@@ -342,3 +342,56 @@ def text_to_payload(document_id, title, text, metadata):
 ├── bm25_top_k=4 → 关键词精确匹配结果 (补充，非融合)
 └── 合并去重 → 上下文扩展
 ```
+
+## 数据存储
+
+在向量数据库中，如何设计文档的层级结构存储方案？文档→章节→段落→句子这种层级关系，应该怎样组织ID和存储，以便既能做向量检索，又能追溯上下文？
+
+使用 SQLite + sqlite-vec：
+
+**父子引用模式:**
+```python
+# 句子/段落存储时携带父级 ID，便于追溯上下文
+class NodeKind(str, Enum):
+    DOCUMENT = "document"
+    SECTION = "section"
+    PARAGRAPH = "paragraph"
+    SENTENCE = "sentence"
+    ATTACHMENT = "attachment"
+
+@dataclass
+class StoredNode:
+    node_id: str              # 层级 ID
+    parent_id: str | None     # 父节点引用
+    kind: NodeKind            # 节点类型
+    embedding: np.ndarray     # 向量
+    child_ids: list[str]      # 子节点 ID 列表
+    ...
+
+# 检索时可以获取上下文
+context = await store.get_context(
+    "doc_001:sec_01:para_02:sent_03",
+    parent_depth=2,  # 向上取 2 层父节点
+    child_depth=1,   # 向下取 1 层子节点
+)
+```
+
+直接在最细粒度层检索，然后追溯上下文
+
+`Query → 向量检索（所有层级混合） → Top-K 匹配 → get_context() 补全父/子节点`
+
+```python
+# 1. 直接对所有节点做向量检索
+results = self._vectors.search(query_vector, k=k)
+
+# 2. 可选：按类型过滤
+if kinds is not None and node.kind not in kinds:
+    continue
+
+# 3. 检索后补全上下文
+context = await store.get_context(
+    matched_node_id,
+    parent_depth=1,   # 取回父节点（如：句子→段落）
+    child_depth=0,
+)
+```
